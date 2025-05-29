@@ -19,7 +19,7 @@ You would need:
 
 
 ### MicroPython
-To use this project, you will need to install MicroPython on your Raspberry Pi Pico 2. You can find instructions on how to do this on the [official MicroPython website](https://www.raspberrypi.com/documentation/microcontrollers/micropython.html).  
+To use this project, you will need to install MicroPython on your Raspberry Pi Pico 2. You can find instructions on how to do this on the [official Raspberry Pi website](https://www.raspberrypi.com/documentation/microcontrollers/micropython.html).  
 It is recommended to use [Thonny](https://thonny.org/) as the IDE, since it has built-in support for MicroPython and makes it easy to upload files.
 
 ### Uploading Files
