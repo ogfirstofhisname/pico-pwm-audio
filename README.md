@@ -31,8 +31,6 @@ Once the files are uploaded, you can run the player by executing the `main.py` s
 
 The Pico 2 will heat up a bit while playing audio, which is normal. The rise in temperature is caused by the IR drop of the current flowing through the GPIO pins, and should be in the range of 10-15 degrees Celsius for a speaker with 8 Ohm impedance.
 
-[Watch a Video](./files/images/video.mp4).
-
 
 
 
