@@ -1,6 +1,6 @@
 # Picowave - a Raspberry Pi Pico 2 WAV Player
 ![Image](./files/images/cover.jpeg)
-This is an MicroPython educational project meant to learn about the PIO and DMA features of the RP2350, and to experiance the nuts and bolts of driving an audio signal.  
+This is an MicroPython educational project with the purpose of learning about the PIO and DMA features of the RP2350, and to experiance the nuts and bolts of driving an audio signal.  
 
 The result is an acceptable quality WAV player that can play files from flash memory at a sample rate of 18.295kHz. The playback is mono, since only differential speaker drive is used, but can be easily extended to stereo by doubling the number of PIOs and DMA channels used. Audio bit depth is 12 bits (but files are the standard 16 bits).  
 
