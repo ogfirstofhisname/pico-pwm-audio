@@ -4,7 +4,7 @@ from machine import Pin, PWM, mem32, ADC # type: ignore[import]
 import rp2, time # type: ignore[import]
 import struct
 from array import array
-import micropython # type: ignore[import]
+import math
 # from micropython import const
 '''
 This script for the Raspberry Pi Pico 2 (RP2350) plays a 16-bit WAV file using PIO to generate PWM signals that drive a speaker directly.
@@ -65,15 +65,23 @@ class DMAWavPlayer:
         if wav_file_path is not None:
             self._process_wav_file(wav_file_path) # checks for sample rate, bits per sample, and number of channels. set up the file buffer
         self.pio_samples_buffer = array('H', [0] * buffer_n_samples)  # buffer for processed 12-bit unsigned samples
-        self.third_buffer = array('H', [0] * (buffer_n_samples * 2))  # double-sized buffer for DMA transfer in a ping-pong manner
+        # self.third_buffer = array('H', [0] * (buffer_n_samples * 2))  # double-sized buffer for DMA transfer in a ping-pong manner
+        self.third_buffer = self._allocate_third_buffer()  # allocate the third buffer for DMA transfer
         self._set_up_dma()
         self.offset = None
         self._set_pin_drive_strength()  # set the drive strength for the GPIO pins used by the PIO state machine
 
+    def _allocate_third_buffer(self):
+        '''
+        Allocate the third buffer for DMA transfer.
+        The third buffer is twice the size of the buffer_n_samples to allow for ping-pong buffering.
+        '''
+        return array('H', [0] * (self.buffer_n_samples * 2))
+
     def _set_up_dma(self):
         dma = rp2.DMA()
         # DMA.config(read=None, write=None, count=None, ctrl=None, trigger=False)
-        DREQ_SM0_TX = (0 << 3) | 0
+        DREQ_SM0_TX = (0 << 3) | 0 # Section 12.6.4.1. of the RP2350 datasheet
         ctrl_value = dma.pack_ctrl(size=1, inc_write=False, treq_sel=DREQ_SM0_TX)
         self.dma = dma
         self.dma_ctrl_value = ctrl_value  # store the DMA control value for later use
@@ -308,12 +316,51 @@ class DMAWavPlayer:
     #         dst[i] = (int(src[i * channels_in_wav]) + _OFFSET) >> _SHIFT
 
 
+class RingDMAWavPlayer(DMAWavPlayer):
+    '''
+    A subclass of DMAWavPlayer that configures the DMA transfer to a wrap-around its source buffer,
+    saving the need to re-configure the DMA transfer run every time.
+    '''
+
+    def _set_up_dma(self):
+        dma = rp2.DMA()
+        # DMA.config(read=None, write=None, count=None, ctrl=None, trigger=False)
+        DREQ_SM0_TX = (0 << 3) | 0 # Section 12.6.4.1. of the RP2350 datasheet
+        # ring_size = (len(self.third_buffer) * 2).bit_length()  # size in bits of the ring buffer address space
+        ring_size = int(math.log2(len(self.third_buffer) * 2))  # size in bits of the ring buffer address space
+        ctrl_value = dma.pack_ctrl(
+            size=1,
+            inc_read=True,
+            inc_write=False,
+            ring_size=ring_size, # size in bits of the ring buffer address space
+            ring_sel=False, # applies wrap-around to the read address
+            treq_sel=DREQ_SM0_TX, # trigger transfers on the state machine's TX FIFO
+        )
+        self.dma = dma
+        self.dma_ctrl_value = ctrl_value
+
+    def _config_dma_transfer(self):
+        if self.dma.active() == 1:
+            # if the DMA is already active, there's nothing to configure
+            return
+        # Configure the DMA transfer for the audio driver state machine
+        self.dma.config(
+            read=self.third_buffer,
+            write=self.sm,
+            count=len(self.third_buffer),
+            ctrl=self.dma_ctrl_value,
+            trigger=True
+        )
+
+    def _allocate_third_buffer(self):
+        pass
 
 
 
 if __name__ == "__main__":
     # try out the class
     print("Starting DMAWavPlayer example...")
-    player = DMAWavPlayer()
+    # player = DMAWavPlayer()
+    player = RingDMAWavPlayer()
     player.play_wav(wav_file_path="sweet_child_mono_16b_18k295_long.wav", loop=True)
     print("Playback finished.")
