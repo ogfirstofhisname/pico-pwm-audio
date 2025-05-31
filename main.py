@@ -72,10 +72,6 @@ class DMAWavPlayer:
         self._set_pin_drive_strength()  # set the drive strength for the GPIO pins used by the PIO state machine
 
     def _allocate_third_buffer(self):
-        '''
-        Allocate the third buffer for DMA transfer.
-        The third buffer is twice the size of the buffer_n_samples to allow for ping-pong buffering.
-        '''
         return array('H', [0] * (self.buffer_n_samples * 2))
 
     def _set_up_dma(self):
@@ -320,7 +316,17 @@ class RingDMAWavPlayer(DMAWavPlayer):
     '''
     A subclass of DMAWavPlayer that configures the DMA transfer to a wrap-around its source buffer,
     saving the need to re-configure the DMA transfer run every time.
+    !!! IMPORTANT: 
+    This class DOES NOT WORK.
+    The implementation is meant to be based on the DMA's wrap-around feature. This feature, however,
+    works by masking the first n bits of the address, which means that the buffer size AND BASE ADDRESS
+    must be a power of two.
+    This is not the case for an array normally allocated in MicroPython.
+    A workaround is not yet implemented, so the class is not functional.
     '''
+
+    def _allocate_third_buffer(self):
+        raise NotImplementedError("RingDMAWavPlayer is not properly implemented yet. Use DMAWavPlayer instead.")
 
     def _set_up_dma(self):
         dma = rp2.DMA()
@@ -352,8 +358,7 @@ class RingDMAWavPlayer(DMAWavPlayer):
             trigger=True
         )
 
-    def _allocate_third_buffer(self):
-        pass
+    
 
 
 
