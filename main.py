@@ -66,18 +66,28 @@ class DMAWavPlayer:
         if wav_file_path is not None:
             self._process_wav_file(wav_file_path) # checks for sample rate, bits per sample, and number of channels. set up the file buffer
         self.pio_samples_buffer = array('H', [0] * buffer_n_samples)  # buffer for processed 12-bit unsigned samples
-        # self.third_buffer = array('H', [0] * (buffer_n_samples * 2))  # double-sized buffer for DMA transfer in a ping-pong manner
         self.third_buffer = self._allocate_third_buffer()  # allocate the third buffer for DMA transfer
         self._set_up_dma()
         self.offset = None
         self._set_pin_drive_strength()  # set the drive strength for the GPIO pins used by the PIO state machine
+
+    def close(self):
+        '''
+        Closes the WAV file if it is open and stops the audio driver state machine.
+        This method should be called when the player is no longer needed to free up resources.
+        '''
+        if self.wav_file_obj is not None:
+            self.wav_file_obj.close()
+            self.wav_file_obj = None
+        self.sm.active(0)
+        self._abort_dma_transfer_run()  # stop the DMA transfer
+
 
     def _allocate_third_buffer(self):
         return array('H', [0] * (self.buffer_n_samples * 2))
 
     def _set_up_dma(self):
         dma = rp2.DMA()
-        # DMA.config(read=None, write=None, count=None, ctrl=None, trigger=False)
         DREQ_SM0_TX = (0 << 3) | 0 # Section 12.6.4.1. of the RP2350 datasheet
         ctrl_value = dma.pack_ctrl(size=1, inc_write=False, treq_sel=DREQ_SM0_TX)
         self.dma = dma
@@ -109,7 +119,6 @@ class DMAWavPlayer:
         )
         if sm.tx_fifo() == 0:
             sm.put(4095)
-
         return sm
     
     def _process_wav_file(self, wav_file_path):
@@ -228,8 +237,6 @@ class DMAWavPlayer:
                 self.offset += got_bytes  # update offset for the next read
                 # now the second half of the third buffer is filled with samples, waiting for the DMA to reach it.
                 # wait for the DMA transfer to complete the first half
-                # while self.dma.count > self.buffer_n_samples:
-                #     pass
                 self._wait_for_dma_to_clear_first_half()
                 # now we can refill the first half of the third buffer with the next samples
                 self.third_buffer[:self.buffer_n_samples] = self.pio_samples_buffer[:]
@@ -238,8 +245,6 @@ class DMAWavPlayer:
                 got_bytes = self._fill_buffer_from_wav()
                 self.offset += got_bytes  # update offset for the next read
                 # wait for the DMA transfer to complete
-                # while self.dma.count > 0:
-                #     pass
                 self._wait_for_dma_to_clear_second_half()
             self.led_pin.off()  # turn off the built-in LED to indicate playback end or pause
             if not self.loop:
@@ -331,13 +336,9 @@ class RingDMAWavPlayer(DMAWavPlayer):
     '''
     A subclass of DMAWavPlayer that configures the DMA transfer to a wrap-around its source buffer,
     saving the need to re-configure the DMA transfer run every time.
-    !!! IMPORTANT: 
-    This class DOES NOT WORK.
-    The implementation is meant to be based on the DMA's wrap-around feature. This feature, however,
-    works by masking the first n bits of the address, which means that the buffer size AND BASE ADDRESS
-    must be a power of two.
-    This is not the case for an array normally allocated in MicroPython.
-    A workaround is not yet implemented, so the class is not functional.
+
+    The buffer allocation is different from the base class, as it over-allocates a large buffer and slices it to
+    carve an address-aligned buffer for the DMA to wrap around.
     '''
 
     def _allocate_third_buffer(self):
@@ -348,53 +349,32 @@ class RingDMAWavPlayer(DMAWavPlayer):
         - use memoryview to slice a buffer of the required size with an aligned base address
         - keep a reference to the original buffer to avoid garbage collection
         '''
-        # return array('H', [0] * (self.buffer_n_samples * 2))
-        # allocate a large buffer, twice the size of the required ping-pong buffer
-        # this buffer will remain in memory to avoid garbage collection
-        '''
-        We use buffer size of buffer_n_samples (number of samples). After sample conversion, we only have one audio channel at 16 bits per sample.
-        So, each half of the ping pong buffer needs to be filled with buffer_n_samples (number of samples).
-        So, the entire ping-pong buffer size is buffer_n_samples * 2 (two halves) (number of samples).
-        The excessively large buffer should be twice the size of the ping-pong buffer, minus one sample, to guarantee that
-        an offset can be found that aligns the base address.
-        Therefore, we allocate an array of size buffer_n_samples * 4 - 1.
-        '''
-        self._large_buffer = array('H', [0] * (self.buffer_n_samples * 4 - 1))  # four times the size for safety
+        # the ping-pong buffer size should be 2*buffer_n_samples, so over-allocate a large buffer of size 2*(2*buffer_n_samples)-1
+        self._large_buffer = array('H', [0] * (self.buffer_n_samples * 4 - 1)) # (samples)
         # get the base address of the large buffer using uctypes
         base_address = uctypes.addressof(self._large_buffer)
-        # calculate a start address for the third buffer that is aligned to the buffer_n_samples * 2
-        '''
-        As we mentioned, the third buffer should be buffer_n_samples * 2 samples in size.
-        Since each sample is 2 bytes, the size in bytes is buffer_n_samples * 2 * 2 = buffer_n_samples * 4.
-        '''
+        # calculate a start address for the third buffer that is aligned to the buffer_n_samples * 2 size in bytes - which is buffer_n_samples * 4 
         align = self.buffer_n_samples * 4  # alignment size in bytes
-        start = (base_address + align - 1) & ~(align - 1)  # advance by buffer_n_samples * 2 -1 and then zero out the lower bits
-        # # calculate an offset to align the base address to self.buffer_n_samples * 2
-        # offset = (-base_address) & (self.buffer_n_samples * 2 - 1)
-        offset = (start - base_address)  # calculate the offset to align the base address
-        offset_items = offset // 2  # offset in items, since the array is of type 'H' (16-bit unsigned integers)
-        self._third_buffer_start_address = base_address + offset  # aligned start address of the third buffer
+        start = (base_address + align - 1) & ~(align - 1)  # advance by align -1 and then zero out the lower bits
+        offset = (start - base_address)  # calculate the offset to align the base address (bytes)
+        offset_items = offset // 2  # offset in "memoryview items", since the array is of type 'H' (16-bit unsigned integers).
+        self._third_buffer_start_address = base_address + offset  # aligned start address of the third buffer (bytes)
         self._third_buffer_size_items = self.buffer_n_samples * 2  # size in samples, or memoryview items for a memoryview produced from the 'H' array
-        self._third_buffer_size_bytes = self.buffer_n_samples * 4
+        self._third_buffer_size_bytes = self.buffer_n_samples * 4 # size in bytes, since the array is of type 'H' (16-bit unsigned integers).
         self._third_buffer_end_address = self._third_buffer_start_address + (self._third_buffer_size_bytes)
         # create a memoryview of the large buffer and slice it to the required size
         self._whole_mv = memoryview(self._large_buffer)
-        # aligned_mv = self._whole_mv[offset:offset + self._third_buffer_size_bytes]
         aligned_mv = self._whole_mv[offset_items:offset_items + self._third_buffer_size_items]
-        # print(f'large buffer size in samples: {len(self._large_buffer)}, align: {align}, offset: {offset}, start: {hex(start)}, aligned start address: {hex(self._third_buffer_start_address)}, end address: {hex(self._third_buffer_end_address)}')
-        # print(f'Aligned third buffer address: {hex(uctypes.addressof(aligned_mv))}, size: {len(aligned_mv)} samples ({len(aligned_mv) * 2} bytes).')
         # return the aligned memoryview
         return aligned_mv
     
     def _wait_for_dma_to_clear_first_half(self):
         # wait for the DMA to clear the first half of the third buffer
         while self.dma.read < self._third_buffer_start_address + self._third_buffer_size_bytes // 2:
-            # print(f'not yet passed the halfway point: started this first half at {hex(self._third_buffer_start_address)}, now at {hex(self.dma.read)}, halfway at {hex(self._third_buffer_start_address + self._third_buffer_size_bytes // 2)}, end at {hex(self._third_buffer_start_address + self._third_buffer_size_bytes)}')
             pass
 
     def _wait_for_dma_to_clear_second_half(self):
         while self.dma.read > self._third_buffer_start_address + self._third_buffer_size_bytes // 2:
-            # print(f'not yet passed the end point: started this second half at {hex(self._third_buffer_start_address + self._third_buffer_size_bytes // 2)}, now at {hex(self.dma.read)}, end at {hex(self._third_buffer_start_address + self._third_buffer_size_bytes)}')
             pass
 
 
@@ -402,12 +382,9 @@ class RingDMAWavPlayer(DMAWavPlayer):
 
     def _set_up_dma(self):
         dma = rp2.DMA()
-        # DMA.config(read=None, write=None, count=None, ctrl=None, trigger=False)
         DREQ_SM0_TX = (0 << 3) | 0 # Section 12.6.4.1. of the RP2350 datasheet
-        # ring_size = (len(self.third_buffer) * 2).bit_length()  # size in bits of the ring buffer address space
-        # ring_size = int(math.log2(self._third_buffer_size_bytes))  # size in bits of the ring buffer address space
-        # int seems to suffer from precision issues, use round() instead
-        ring_size = round(math.log2(self._third_buffer_size_bytes))  # size in bits of the ring buffer address space
+        ring_size = round(math.log2(self._third_buffer_size_bytes))  # size in bits of the ring buffer address space. The DMA wraps around the last ring_size bits of the address.
+        # pack the DMA control value with the ring buffer settings
         ctrl_value = dma.pack_ctrl(
             size=1,
             inc_read=True,
@@ -421,8 +398,7 @@ class RingDMAWavPlayer(DMAWavPlayer):
         self.dma_running = False
 
     def _config_dma_transfer(self):
-        if self.dma_running:
-            # print("DMA transfer is already configured and running. No need to re-configure.")
+        if self.dma_running: # DMA has already been configured and is running
             return
         else:
             # Configure the DMA transfer for the audio driver state machine
@@ -452,14 +428,7 @@ if __name__ == "__main__":
     # try out the class
 
     print("Starting DMAWavPlayer example...")
-    player = RingDMAWavPlayer(buffer_n_samples=2048)
-#     for _ in range(3):
-#         print(f"Temperature: {player.read_temperature():.2f} C")
-#         time.sleep(1)
+    player = DMAWavPlayer(buffer_n_samples=1024)
     player.play_wav(wav_file_path="sweet_child_mono_16b_18k295.wav", loop=False)
+    player.close()  # close the player to free up resources. Optional
     print("Playback finished.")
-#     for _ in range(3):
-#         print(f"Temperature: {player.read_temperature():.2f} C")
-#         time.sleep(_+0.5)
-
-

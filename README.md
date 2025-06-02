@@ -27,7 +27,7 @@ Once you have MicroPython installed, you can upload the files in this project to
 You would want to upload the `main.py` and `pio.py` source code files, as well as one or more WAV files. You can use the provided `sweet_child_mono_16b_18k295_long.wav` file which is already in the correct format (see the section below on File Format and Handling).
 
 ### Running the Player
-Once the files are uploaded, you can run the player by executing the `main.py` script, which should also be run automatically when the Pico 2 boots up. Alternatively, you can import and use the *DMAWavPlayer* class in your own scripts.  
+Once the files are uploaded, you can run the player by executing the `main.py` script, which should also be run automatically when the Pico 2 boots up. Alternatively, you can import and use the *DMAWavPlayer* or *RingDMAWavPlayer* in your own code.
 
 The Pico 2 will heat up a bit while playing audio, which is normal. The rise in temperature is caused by the IR drop of the current flowing through the GPIO pins, and should be in the range of 10-15 degrees Celsius for a speaker with 8 Ohm impedance.
 
@@ -45,11 +45,39 @@ Every microprocessor (MCU) has GPIO (General Purpose Input/Output) pins, which c
 A description of a similar solution can be found in [this application note](https://www.nxp.com/docs/en/application-note/AN4369.pdf).
 
 ## The PIO State Machine
-TODO
+The PIO is a special feature of the Raspberry Pi microcontrollers (RP2040 and RP2350) that allows for directly programming (in assembly-like language) a small state machine core that can run in parallel with the main CPU, with extensive GPIO control, FIFO buffers and DMA interface. Read more about it [here](https://www.raspberrypi.com/news/what-is-pio/) and in the [RP2350 datasheet](https://datasheets.raspberrypi.com/rp2350/rp2350-datasheet.pdf), section 11.  
+
+For this project, the PIO machine runs a boilerplate, 12-bit PWM program. A value of 4095, supplied once by the main program, is counted down to 0, outputting 1 for T_ON and 0 for T_OFF, where T_ON is a 12-bit value supplied by the main program.  
+
+The existing PWM peripheral could have been used instead, but the PIO was used for educational purposes, and also to allow some small buffering of the data from the main program.
+
 
 ## The DMA and Buffer System
 
+There are three consecutive stages of buffering:
+1. **WAV Samples Buffer**: Raw samples from the WAV file are read into a buffer allocated in RAM.
+2. **Converted Samples Buffer**: The raw, 16-bit, stereo or mono samples are converted to 12-bit mono samples, and stored in a second buffer allocated in RAM.
+3. **DMA Buffer**: The converted samples are then memory-copied to a third buffer which is used as the ping-pong buffer for the DMA transfers (as the DMA transfers need to
+run continuously, without interruption).  
+
+There is also a (comparatively small) FIFO buffer in the PIO state machine.  
+
+
 ![Image](./files/images/datapath.png)
+
+The DMA is configured in several different ways, depending on the player type used - again, for educational purposes.  
+### The DMAWavPlayer - single transfer run, triggered again and again by the main program
+The simplest DMA configuration is the *DMAWavPlayer*, which triggers a single run of DMA transfers again and again, each time refilling the second half, and then
+the first half, of the ping-pong buffer. This is done by the main program, which waits for the DMA transfer to complete and re-triggers it.  
+Empirical profiling shows that MicroPython takes 50-100usec to trigger the DMA transfer, which is equivalent to 1-2 samples at the 18.295kHz sample rate.
+This is covered by the FIFO buffer in the PIO state machine, which can hold up to 4 samples.
+### The RingDMAWavPlayer - DMA set to auto-wrap-around
+The *RingDMAWavPlayer* uses a more complex DMA configuration, which allows the DMA to run continuously, without the need for the main program to trigger it.
+This is done by configuring the DMA to auto-wrap-around the ping-pong buffer again and again until stopped.
+The tricky part is to allocate the ping-pong buffer in the right size and place in memory.
+### The ContinuousDMAWavPlayer - dual DMA channels chained together
+Not implemented yet.
+
 
 ## File Format and Handling
 WAV files are a standard audio file format which is typically formatted as a header, followed by a series of binary samples. The samples can be re-sampled to different sample rates and with different bit depths by using a tool like [ffmpeg](https://www.ffmpeg.org/download.html).
