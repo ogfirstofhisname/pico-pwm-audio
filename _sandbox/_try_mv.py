@@ -1,6 +1,6 @@
-import uctypes
+import uctypes # type: ignore
 from array import array
-from rp2 import DMA
+from rp2 import DMA # type: ignore
 import time
 
 buffer_n_samples = 128
