@@ -75,7 +75,7 @@ This is covered by the FIFO buffer in the PIO state machine, which can hold up t
 The *RingDMAWavPlayer* uses a more complex DMA configuration, which allows the DMA to run continuously, without the need for the main program to trigger it.
 This is done by configuring the DMA to auto-wrap-around the ping-pong buffer again and again until stopped.
 The tricky part is to allocate the ping-pong buffer in the right size and place in memory.
-### The ContinuousDMAWavPlayer - dual DMA channels chained together
+### The DualDMAWavPlayer - dual DMA channels chained together
 Not implemented yet.
 
 

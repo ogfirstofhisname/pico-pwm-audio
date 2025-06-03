@@ -66,7 +66,7 @@ class DMAWavPlayer:
         if wav_file_path is not None:
             self._process_wav_file(wav_file_path) # checks for sample rate, bits per sample, and number of channels. set up the file buffer
         self.pio_samples_buffer = array('H', [0] * buffer_n_samples)  # buffer for processed 12-bit unsigned samples
-        self.third_buffer = self._allocate_third_buffer()  # allocate the third buffer for DMA transfer
+        self._allocate_third_buffer()  # allocate the third buffer for DMA transfer
         self._set_up_dma()
         self.offset = None
         self._set_pin_drive_strength()  # set the drive strength for the GPIO pins used by the PIO state machine
@@ -84,7 +84,7 @@ class DMAWavPlayer:
 
 
     def _allocate_third_buffer(self):
-        return array('H', [0] * (self.buffer_n_samples * 2))
+        self.third_buffer = array('H', [0] * (self.buffer_n_samples * 2))
 
     def _set_up_dma(self):
         dma = rp2.DMA()
@@ -228,9 +228,11 @@ class DMAWavPlayer:
             self.led_pin.on()  # turn on the built-in LED to indicate playback start
 
             while got_bytes > 0: # playback chunks loop
+                print('1st half')
                 self._config_dma_transfer()
                 # fill the second half of the third buffer with the next samples. The DMA is still going through the first half.
-                self.third_buffer[self.buffer_n_samples:] = self.pio_samples_buffer[:]
+                # self.third_buffer[self.buffer_n_samples:] = self.pio_samples_buffer[:]
+                self._fill_third_buffer_second_half()  # fill the second half of the third buffer with the pio_samples_buffer
                 # back-refill the preceding buffers
                 self._convert_buffer_to_pio_samples()
                 got_bytes = self._fill_buffer_from_wav()
@@ -238,8 +240,10 @@ class DMAWavPlayer:
                 # now the second half of the third buffer is filled with samples, waiting for the DMA to reach it.
                 # wait for the DMA transfer to complete the first half
                 self._wait_for_dma_to_clear_first_half()
+                print('2nd half')
                 # now we can refill the first half of the third buffer with the next samples
-                self.third_buffer[:self.buffer_n_samples] = self.pio_samples_buffer[:]
+                # self.third_buffer[:self.buffer_n_samples] = self.pio_samples_buffer[:]
+                self._fill_third_buffer_first_half()  # fill the first half of the third buffer with the pio_samples_buffer
                 # back-refill the preceding buffers
                 self._convert_buffer_to_pio_samples()
                 got_bytes = self._fill_buffer_from_wav()
@@ -279,7 +283,8 @@ class DMAWavPlayer:
     def _set_pin_drive_strength(self):
         # set drive strength for the non-inverting and inverting GPIO pins
         for pin_num in range(self.noninverting_gpio_n, self.inverting_gpio_n + 5):
-            self._set_drive_single_pin(pin_num, 12)
+            # self._set_drive_single_pin(pin_num, 12)
+            self._set_drive_single_pin(pin_num, 2)
 
     def _preload_buffers(self):
         # fill the first half of the third buffer, then refill the pio_samples_buffer and the file_buffer
@@ -291,7 +296,8 @@ class DMAWavPlayer:
             self.wav_file_obj.seek(self.offset)
         got_bytes = self._fill_buffer_from_wav()
         self._convert_buffer_to_pio_samples()
-        self.third_buffer[:self.buffer_n_samples] = self.pio_samples_buffer[:]  # copy the first half of the pio_samples_buffer to the third buffer
+        # self.third_buffer[:self.buffer_n_samples] = self.pio_samples_buffer[:]  # copy the first half of the pio_samples_buffer to the third buffer
+        self._fill_third_buffer_first_half()  # fill the first half of the third buffer with the pio_samples_buffer
         # refill the preceding buffers
         self.offset += got_bytes  # update offset for the next read
         got_bytes = self._fill_buffer_from_wav()
@@ -300,6 +306,14 @@ class DMAWavPlayer:
         got_bytes = self._fill_buffer_from_wav()
         self.offset += got_bytes
         return got_bytes  # return the number of bytes read into the file_buffer
+    
+    def _fill_third_buffer_first_half(self):
+        # fill the first half of the third buffer with the pio_samples_buffer
+        self.third_buffer[:self.buffer_n_samples] = self.pio_samples_buffer[:]
+
+    def _fill_third_buffer_second_half(self):
+        # fill the second half of the third buffer with the pio_samples_buffer
+        self.third_buffer[self.buffer_n_samples:] = self.pio_samples_buffer[:]
 
     def _fill_buffer_from_wav(self):
         # fill the file_buffer with raw 16-bit samples from the WAV file
@@ -366,7 +380,7 @@ class RingDMAWavPlayer(DMAWavPlayer):
         self._whole_mv = memoryview(self._large_buffer)
         aligned_mv = self._whole_mv[offset_items:offset_items + self._third_buffer_size_items]
         # return the aligned memoryview
-        return aligned_mv
+        self.third_buffer = aligned_mv
     
     def _wait_for_dma_to_clear_first_half(self):
         # wait for the DMA to clear the first half of the third buffer
@@ -411,24 +425,138 @@ class RingDMAWavPlayer(DMAWavPlayer):
             )
             self.dma_running = True  # mark the DMA as running
 
-    class ContinuousDMAWavPlayer(DMAWavPlayer):
-        '''
-        A subclass of DMAWavPlayer that configures the DMA transfer to run continuously,
-        without the need to re-configure the DMA transfer every time.
-        This is achieved by utilizing two (2) DMA channels that trigger each other in an alternating manner.
-        This way, the DMA configuration is done only once, and all the main program needs to do is to fill the buffers with new samples.
-        '''
+class DualDMAWavPlayer(DMAWavPlayer):
+    '''
+    A subclass of DMAWavPlayer that configures the DMA transfer to run continuously,
+    without the need to re-configure the DMA transfer every time.
+    This is achieved by utilizing two (2) DMA channels that trigger each other in an alternating manner.
+    This way, the DMA configuration is done only once, and all the main program needs to do is to fill the buffers with new samples.
+    '''
 
-        def _set_up_dma(self):
-            dma_a = rp2.DMA()
-            dma_b = rp2.DMA()
-            
+    def _set_up_dma(self):
+        self.dma_a = rp2.DMA()
+        self.dma_b = rp2.DMA()
+        DREQ_SM0_TX = (0 << 3) | 0 # Section 12.6.4.1. of the RP2350 datasheet
+        self.ctrl_value_a = self.dma_a.pack_ctrl(
+            size=1,
+            inc_write=False,
+            inc_read=True,
+            treq_sel=DREQ_SM0_TX,
+            chain_to=self.dma_b.channel,  # chain to the next DMA channel
+        )
+        self.ctrl_value_b = self.dma_b.pack_ctrl(
+            size=1,
+            inc_write=False,
+            inc_read=True,
+            treq_sel=DREQ_SM0_TX,
+            chain_to=self.dma_a.channel,  # chain to the previous DMA channel
+        )
+        self.dma_running = False
+
+    def _config_dma_transfer(self):
+        if self.dma_running: # DMA has already been configured and is running
+            return
+        else:
+            # Configure the DMA transfer for the audio driver state machine
+            self.dma_a.config(
+                read=self.third_buffer_a,
+                write=self.sm,
+                # transfer count is for the first half of the third buffer. The second half will be filled by the other DMA channel
+                count=self.buffer_n_samples,
+                ctrl=self.ctrl_value_a,
+                trigger=True  # trigger the DMA transfer on the state machine's TX FIFO
+            )
+            self.dma_b.config(
+                read=self.third_buffer_b,
+                write=self.sm,
+                # transfer count is for the second half of the third buffer. The first half will be filled by the other DMA channel
+                count=self.buffer_n_samples,
+                ctrl=self.ctrl_value_b,
+                # trigger=True  # trigger the DMA transfer on the state machine's TX FIFO
+            )
+            # start the DMA transfer
+            # self.dma_a.active(1)  # activate the first DMA channel
+            # self.dma_b.active(1)  # activate the second DMA channel
+            self.dma_running = True  # mark the DMA as running
+
+    def _allocate_third_buffer(self):
+        '''
+        Here we allocate two buffers, each of size buffer_n_samples, to be used by the two DMA channels.
+        Together, they form a ping-pong buffer of size 2*buffer_n_samples.
+        '''
+        self.third_buffer_a = array('H', [0] * self.buffer_n_samples)
+        self.third_buffer_b = array('H', [0] * self.buffer_n_samples)
+
+
+    def _wait_for_dma_to_clear_first_half(self):
+        # wait for the DMA to clear the first half of the third buffer
+        # while self.dma_a.count > 0:
+        while self.dma_a.unpack_ctrl(self.dma_a.ctrl)["busy"] == 1:
+            # print("Waiting for DMA A to clear first half...")
+            # print(f'dma_a busy: {self.dma_a.unpack_ctrl(self.dma_a.ctrl)["busy"]}')
+            pass
+        # print(f'dma_a busy: {self.dma_a.unpack_ctrl(self.dma_a.ctrl)["busy"]}')
+
+
+    def _wait_for_dma_to_clear_second_half(self):
+        if not self.dma_b.unpack_ctrl(self.dma_b.ctrl)["busy"] == 0:
+            # if the DMA B is busy, we cannot fill the second half of the third buffer
+            print("DMA B is busy, cannot fill the second half of the third buffer.")
+            return
+        # wait for the DMA to clear the second half of the third buffer
+        # while self.dma_b.count > 0:
+        while self.dma_b.unpack_ctrl(self.dma_b.ctrl)["busy"] == 1:
+            # print("Waiting for DMA B to clear second half...")
+            # print(f'dma_b busy: {self.dma_b.unpack_ctrl(self.dma_b.ctrl)['busy']}')
+            pass
+        # print(f'dma_b busy: {self.dma_b.unpack_ctrl(self.dma_b.ctrl)['busy']}')
+
+
+    def _fill_third_buffer_first_half(self):
+        if not self.dma_a.unpack_ctrl(self.dma_a.ctrl)["busy"] == 0:
+            # also check DMA b
+            dma_b_busy = self.dma_b.unpack_ctrl(self.dma_b.ctrl)["busy"]
+            # if the DMA A is busy, we cannot fill the first half of the third buffer
+            print(f"DMA A is busy, cannot fill the first half of the third buffer. Is DMA B also busy? {dma_b_busy}")
+            return
+        # fill the first half of the third buffer with the pio_samples_buffer
+        self.third_buffer_a[:] = self.pio_samples_buffer[:]
+        # also re-arm the DMA by setting the count to the buffer size
+        self.dma_a.config(
+            read=self.third_buffer_a,
+            count=self.buffer_n_samples,
+            ctrl=self.ctrl_value_a
+        )
+
+    def _fill_third_buffer_second_half(self):
+        if not self.dma_b.unpack_ctrl(self.dma_b.ctrl)["busy"] == 0:
+            # also check DMA a
+            dma_a_busy = self.dma_a.unpack_ctrl(self.dma_a.ctrl)["busy"]
+            # if the DMA B is busy, we cannot fill the second half of the third buffer
+            print(f"DMA B is busy, cannot fill the second half of the third buffer. Is DMA A also busy? {dma_a_busy}")
+            return
+        # fill the second half of the third buffer with the pio_samples_buffer
+        self.third_buffer_b[:] = self.pio_samples_buffer[:]
+        # also re-arm the DMA by setting the count to the buffer size
+        self.dma_b.config(
+            read=self.third_buffer_b,
+            count=self.buffer_n_samples,
+            ctrl=self.ctrl_value_b
+        )
+
+    def _abort_dma_transfer_run(self):
+        # stop the DMA transfer by setting the count to 0 for both channels
+        self.dma_a.count = 0
+        self.dma_b.count = 0
+        self.dma_running = False
+
 
 if __name__ == "__main__":
     # try out the class
 
     print("Starting DMAWavPlayer example...")
-    player = DMAWavPlayer(buffer_n_samples=1024)
+    player = DualDMAWavPlayer(buffer_n_samples=2 ** 14)
     player.play_wav(wav_file_path="sweet_child_mono_16b_18k295.wav", loop=False)
     player.close()  # close the player to free up resources. Optional
     print("Playback finished.")
+
